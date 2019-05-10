@@ -29,7 +29,7 @@ class Trainer():
     self._last_log = {}
     if 'postfix' not in kwargs:
       self.postfix = lambda: self._last_log
-    
+
     self.state_dict = {}
     self.state_dict['experiment_uid'] = '{:%m-%d-%H%M%S}'.format(datetime.now())
     self.state_dict['experiment_name'] = '{}-{}'.format(_logname, self.state_dict['experiment_uid'])
@@ -57,19 +57,19 @@ class Trainer():
 
   def __call__(self, dataset, epochs=1, train=False, progress=None, leave=True, profile_alpha=.90, grad=True, **kwargs):
     trainer = self
-    dkwargs = {'num_workers': self.num_workers, 
+    dkwargs = {'num_workers': self.num_workers,
                'pin_memory':self.pin_memory,
 
                # Hide KeyboardInterrupt on the workers
                'worker_init_fn': lambda x: signal.signal(signal.SIGINT, lambda signum, frame: None)}
     dkwargs.update(kwargs)
-    
+
     dataloader = DataLoader(dataset, **dkwargs)
-    
+
     class Gen():
       def __len__(self):
         return epochs * len(dataloader)
-      
+
       def __iter__(self):
         show_progress = progress is not None
         trainer.load_duration = 0
@@ -79,13 +79,15 @@ class Trainer():
         step = trainer.state_dict.get('step', 0)
         init_epoch = trainer.state_dict.get('epoch', 0)
         with tqdm(range(init_epoch, epochs), desc='Epochs', disable=not show_progress or epochs == 1, initial=init_epoch, total=epochs) as epochbar:
+          print("inside epochbar. init_epoch={}, epochs={}".format(init_epoch, epochs))
           for e in epochbar:
+            print("epoch {}".format(e))
             trainer.state_dict['epoch'] = e
 
-            with tqdm(dataloader, 
+            with tqdm(dataloader,
                       disable=not show_progress,
                       desc=progress, leave=leave, smoothing=.9) as bar:
-              
+
               for i, data in enumerate(bar):
                 if trainer._cuda:
                   data = [d.cuda(async=True) for d in data] if len(data) > 0 else d.cuda(async=True)
@@ -93,7 +95,7 @@ class Trainer():
 
                 if before_load > 0:
                   trainer.load_duration = profile_alpha * trainer.load_duration + (1 - profile_alpha) * (after_load - before_load)
-                
+
                 with torch.autograd.set_grad_enabled(grad):
                   with torch.autograd.set_detect_anomaly(trainer.debug) as stack:
                     with torch.autograd.profiler.profile(utils.is_profile and step >= trainer.profile_burnin, use_cuda=trainer.cuda) as prof:
@@ -126,7 +128,7 @@ class Trainer():
                 step += 1
 
                 # only call trainer.postfix if the bar was updated
-                # this means the display is always 1 behind 
+                # this means the display is always 1 behind
                 if show_progress and bar.last_print_n == i:
                   bar.set_postfix(**trainer._processpostfix(), refresh=True)
 
@@ -135,7 +137,7 @@ class Trainer():
             epochbar.set_postfix(**trainer._processpostfix(), refresh=True)
 
     return Gen()
-        
+
   @staticmethod
   def flatten_dict(dd, separator='.', prefix=''):
     # https://stackoverflow.com/questions/6027558/flatten-nested-python-dictionaries-compressing-keys
@@ -143,7 +145,7 @@ class Trainer():
              for kk, vv in dd.items()
              for k, v in Trainer.flatten_dict(vv, separator, kk).items()
              } if isinstance(dd, dict) else { prefix : dd }
-  
+
   def log(self, t, **kwargs):
     # self._log_queue.put((t, kwargs))
     # self._last_log['q:'] = self._log_queue.qsize()
@@ -159,6 +161,9 @@ class Trainer():
     # only write log entries for new data
     for label_stub, value in newlog.items():
       label = label_stub.split(':')[-1]
+      # if label == 'present_xtruth':
+      #   print("about to log present_xtruth")
+      #   import pdb; pdb.set_trace()
       dotindex = label_stub.rfind('.')
       if dotindex > -1 and label != label_stub and len(label) > 0:
         label = label_stub[:dotindex + 1] + label
@@ -166,7 +171,7 @@ class Trainer():
       if len(label) > 0 and self.writer:
         if torch.is_tensor(value) and value.numel() == 1:
           self.writer.add_scalar(label, value, t)
-        
+
         elif torch.is_tensor(value) and len(value.size()) == 4:
           value = value[:, :3] if value.size(1) >= 3 else value[:, 0:1]
           image = vutils.make_grid(value, normalize=False, scale_each=False)
@@ -174,7 +179,7 @@ class Trainer():
           self.writer.add_image(label, torch.clamp(image, min=0, max=1), t) # tbxutils.figure_to_image(fig)
 
         elif torch.is_tensor(value) and len(value.size()) == 3:
-          value = value[:3] if value.size(0) > 3 else value[0:1]
+          value = value[:3] if value.size(0) >= 3 else value[0:1]
           image = value - value.min()
           image /= image.max()
           self.writer.add_image(label, torch.clamp(image, min=0, max=1), t) # tbxutils.figure_to_image(fig)
@@ -189,7 +194,7 @@ class Trainer():
 
         elif np.isscalar(value) and not isinstance(value, str):
           self.writer.add_scalar(label, value, t)
-        
+
         elif np.isscalar(value) and isinstance(value, str):
           import re
           value = re.compile(r'(\x9B|\x1B\[)[0-?]*[ -/]*[@-~]').sub('', ('\t' + value).replace('\n', '  \n\t'))
@@ -206,7 +211,7 @@ class Trainer():
         continue
       except KeyboardInterrupt:
         return
-    
+
   def checkpoint(self, model, optimizer, tag='checkpoint', resume=False, path=None, log=None, **kwargs):
     if not utils.is_profile and not self.debug:
       filename = tag + '.pth.tar'
@@ -241,7 +246,7 @@ class Trainer():
     if path is None:
       path = os.path.join(self.state_dict['savepath'], filename)
       path = path.replace(self.state_dict['experiment_name'], '*' if uid == '' else uid)
-      
+
     checkpoints = glob.glob(path)
     checkpoints.sort(key=os.path.getmtime)
 
@@ -250,12 +255,13 @@ class Trainer():
 
     if len(checkpoints) == 1 or unique == False:
       path = checkpoints[-1]
+      print("Checkpoint path: {}".format(path))
       sd = torch.load(path)
       model.load_state_dict(sd['model'])
       optimizer.load_state_dict(sd['optimizer'])
 
       self.state_dict = sd['trainer']
       return path
-      
+
     else:
       raise Exception('Checkpoint is not unique, but unique=True was specified')

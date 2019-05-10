@@ -5,6 +5,8 @@ from libs.args.args import argchoice, argignore
 import numpy as np
 import pdb
 import utils
+from torchvision.utils import save_image, make_grid
+from torchvision import transforms
 
 from modules import ReversibleFlow, Network, AffineFlowStep, Unitary
 
@@ -14,7 +16,7 @@ class GlowPrediction(nn.Module):
   def __init__(self, dataset, flow:argchoice=[ReversibleFlow]):
     self.__dict__.update(locals())
     super(GlowPrediction, self).__init__()
-    example = torch.stack([dataset[i][0][0] for i in range(2)])
+    example = torch.stack([dataset[i][0][0] for i in range(1)])
     self.flow = flow(examples=example)
 
 
@@ -25,10 +27,12 @@ class GlowPrediction(nn.Module):
   def logger(self, step, data, out):
     if step % 100 == 0:
       x, _ = data
-      zcat, zlist, logdet = out 
-      xhat, _ = self.flow.decode([torch.randn_like(z) for z in zlist])
-      return {':xsample': self.dataset.denormalize(xhat),
-              ':xtruth': self.dataset.denormalize(x[:, 0])}
+      zcat, zlist, logdet = out
+      temperature = 0.7
+      xhat, _ = self.flow.decode([temperature * torch.randn_like(z) for z in zlist])
+      return {':xsample': self.dataset.denormalize(xhat), # generated samples
+              ':xtruth': self.dataset.denormalize(x[:, 0]), # true samples, 15 long (10 past + 5 future)
+              ':temperature': temperature} # smaller means more realistic samples
 
 
 class StableSVD(nn.Module):
@@ -69,7 +73,7 @@ class StableRealJordanForm(nn.Module):
 
     with torch.cuda.device(alpha.device):
       A = torch.cuda.FloatTensor(self.eig_alpha.size(0) * 2, self.eig_alpha.size(0) * 2)
-    
+
     A.fill_(0)
     A.view(-1)[::A.size(1) * 2 + 2] = alpha
     A.view(-1)[A.size(1) + 1::A.size(1) * 2 + 2] = alpha
@@ -105,13 +109,13 @@ class FramePredictionBase(nn.Module):
                flow:argchoice=[ReversibleFlow], inner_minimization_as_constant=True):
     self.__dict__.update(locals())
     super(FramePredictionBase, self).__init__()
-    
-    example = torch.stack([dataset[i][0][0] for i in range(20)])
 
-    self.flow = flow(examples=example)    
+    example = torch.stack([dataset[i][0][0] for i in range(1)])
+
+    self.flow = flow(examples=example)
     self.observation_dim = torch.numel(example[0])
     self.example = example[0].unsqueeze(0)
-    
+
     # round up to the nearest power of two, makes multi_matmul significantly faster
     self.hidden_dim = min(self.observation_dim + extra_hidden_dim, max_hidden_dim)
 
@@ -126,7 +130,7 @@ class FramePredictionBase(nn.Module):
     summary += 'Obervation Dimension : {}\n'.format(self.observation_dim)
     summary += '              A type : {}\n'.format(self.A.__class__.__name__)
     summary += '         A Dimension : {0}x{0} = {1}\n'.format(self.hidden_dim, self.hidden_dim**2)
-    # summary += '         C Dimension : {0}x{1} = {2}\n'.format(self.observation_dim, 
+    # summary += '         C Dimension : {0}x{1} = {2}\n'.format(self.observation_dim,
     #                                                            self.hidden_dim,
     #                                                            self.C.numel())
     return summary
@@ -166,6 +170,7 @@ class FramePredictionBase(nn.Module):
     MtM = term
     #b = y.matmul(C)
 
+    # O = [C, C@A, C@C@A, C^3 @ A, ...] (the observation matrices over time)
     O = [C]
     for i in range(x.size(1) - 1):
       O.append(O[-1].matmul(A))
@@ -174,23 +179,27 @@ class FramePredictionBase(nn.Module):
 
     O = torch.cat(O, dim=0) # we can avoid constructing O if we need to
     U = torch.cholesky(MtM, upper=False)
-    rhs = Y.matmul(O) #b.sum(1) 
+    rhs = Y.matmul(O) #b.sum(1)
     z = torch.trtrs(rhs.t(), U, transpose=False, upper=False)[0]
     x0 = torch.trtrs(z, U, transpose=True, upper=False)[0]
-  
+
+    # Dynamic linear system evolution
+    # x is the state, y is the observation
     xtemp = x0
     yhat = [C.matmul(xtemp)]
     for i in range(x.size(1) - 1):
       xtemp = A.matmul(xtemp)
       yhat.append(C.matmul(xtemp))
 
+    # Yhat is the frame prediction, what we actually care about
     Yhat = torch.cat(yhat, dim=0)
 
+    # Why are we comparing Y.T and Yhat? Aren't they the same? Where's Y_truth?
     # this accounts for the scaling factor, but learns an unscaled dynamic system
     w = (Y.t() - Yhat) / scaling_lambda
 
     prediction_error = (w * w).mean()
-  
+
     log_likelihood = (logdet / M).mean() - torch.log(scaling_lambda)
     loss = -log_likelihood + self.prediction_alpha * prediction_error #+ reconstruction_loss
 
@@ -217,10 +226,10 @@ class FramePredictionBase(nn.Module):
     return xhat
 
   @utils.profile
-  def logger(self, step, data, out):
+  def logger(self, step, data, out, force_log=False):
     self.eval()
 
-    x, yin = data
+    x, x_future = data
     b, s, c, h, w = x.shape
     loss, w, Y, Yhat, y, A, x0, logdet, prediction_error, zlist, zcat, O, C, scaling_lambda = out
     stats = {':logdet': logdet.mean(),
@@ -231,10 +240,10 @@ class FramePredictionBase(nn.Module):
              #':Atheta': torch.arccos(.5 * (torch.trace(A) - 1)) # still untested: https://math.stackexchange.com/questions/261617/find-the-rotation-axis-and-angle-of-a-matrix
              }
 
-    stats.update({':tmem_gb': torch.cuda.memory_allocated() * 1e-9,
-                  ':tmaxmem': torch.cuda.max_memory_allocated() * 1e-9,
-                  ':tmemcache': torch.cuda.memory_cached() * 1e-9,
-                  ':tmaxmemcache': torch.cuda.max_memory_cached() * 1e-9})
+    stats.update({':tmem_alloc': torch.cuda.memory_allocated() * 1e-9,
+                  ':tmaxmem_alloc': torch.cuda.max_memory_allocated() * 1e-9,
+                  ':tmem_cache': torch.cuda.memory_cached() * 1e-9,
+                  ':tmaxmem_cache': torch.cuda.max_memory_cached() * 1e-9})
 
     errnorm = w.t().reshape(y.size()).norm(dim=2)
 
@@ -244,11 +253,11 @@ class FramePredictionBase(nn.Module):
                   ':y_min': y.min(),
                   ':y_var': y.var(),
                   ':y_mean_norm': y.norm(dim=2).mean(),
-                  ':log10_first_errnorm': torch.log(errnorm[:, 0].mean()),
-                  ':log10_last_errnorm': torch.log(errnorm[:, -1].mean())
+                  # ':log10_first_errnorm': torch.log(errnorm[:, 0].mean()),
+                  # ':log10_last_errnorm': torch.log(errnorm[:, -1].mean())
                   })
 
-    if step % 100 == 0:
+    if step % 100 == 0 or force_log:
       xhat = self.decode(Yhat.t()[:1], s, zlist)
 
       #render out into the future
@@ -268,20 +277,73 @@ class FramePredictionBase(nn.Module):
       recon_error = self.dataset.denormalize(x[0] - xhat)
       ytruth =      Y[0:1].reshape(y[0:1].size()).reshape(x[0].size())
       yhat = Yhat.t()[0:1].reshape(y[0:1].size()).reshape(x[0].size())
-      
+
       xerror = recon_error.abs().max(1)[0].detach()
       xerror = xerror.reshape(xerror.size(0), -1)
       xerror = xerror.clamp(min=0, max=1)
       xerror = xerror.reshape(recon_error.size(0), 1, recon_error.size(2), recon_error.size(3))
 
-      stats.update({#'recon': recon_error.abs().mean(),
-                    ':yerr': (yhat - ytruth),
-                    #':yerror': (yhat - ytruth).view(-1),
-                    ':xerror': xerror,
-                    ':xhat': self.dataset.denormalize(xhat),
-                    ':xfuture': self.dataset.denormalize(xfuture),
-                    ':xtruth': self.dataset.denormalize(x[0])
+      recon_error = self.dataset.denormalize(x_future[0] - xfuture) # (actual - pred)
+      xerror_future = recon_error.abs().max(1)[0].detach() 
+      xerror_future = xerror_future.reshape(xerror_future.size(0), -1).clamp(min=0, max=1)
+      xerror_future = xerror_future.reshape(recon_error.size(0), 1, recon_error.size(2), recon_error.size(3))
+
+      def grid(imgs):
+        return make_grid(imgs, nrow=10, padding=1, pad_value=imgs.max())
+
+
+      stats.update({':present_yerr': grid(yhat - ytruth),
+                    ':present_xerror': grid(xerror),
+                    ':future_xerror': grid(xerror_future),
+                    ':present_xhat': grid(self.dataset.denormalize(xhat)), # linear system model of past frames
+                    ':future_xhat': grid(self.dataset.denormalize(xfuture)), # linear system model of future frames
+                    ':present_xtruth': grid(self.dataset.denormalize(x[0])), # actual past frames
+                    ':future_xtruth': grid(self.dataset.denormalize(x_future[0])) # actual future frames
                     })
+
+      # import pdb; pdb.set_trace()
+
+      # Calculate PSNR and SSIM
+      present_gt = self.dataset.denormalize(x[0]).detach().cpu()
+      present_hat = self.dataset.denormalize(xhat).detach().cpu()
+      present_psnrs = np.array([utils.sklearn_psnr(gt, hat) for gt, hat in zip(present_gt, present_hat)])
+      present_ssims = np.array([utils.sklearn_ssim(gt, hat) for gt, hat in zip(present_gt, present_hat)])
+
+      future_gt = self.dataset.denormalize(x_future[0]).detach().cpu()
+      future_hat = self.dataset.denormalize(xfuture).detach().cpu()
+      future_psnrs = np.array([utils.sklearn_psnr(gt, hat) for gt, hat in zip(future_gt, future_hat)])
+      future_ssims = np.array([utils.sklearn_ssim(gt, hat) for gt, hat in zip(future_gt, future_hat)])
+
+      stats.update({
+        ':present_psnr': present_psnrs.mean(),
+        ':present_ssim': present_ssims.mean(),
+        ':future_first_psnr': future_psnrs[0],
+        ':future_fifth_psnr': future_psnrs[4],
+        ':future_first_ssim': future_ssims[0],
+        ':future_fifth_ssim': future_ssims[4]
+      })
+
+
+      # temperature = 0.7
+      # xhat_samples, _ = self.flow.decode([temperature * torch.randn_like(z) for z in zlist])
+      # stats.update({':xsample': self.dataset.denormalize(xhat_samples), # generated samples
+      #         # ':xtruth': self.dataset.denormalize(x[:, 0]), # true samples, 15 long (10 past + 5 future)
+      #         ':temperature': temperature}) # smaller means more realistic samples
+
+      save_image(stats[':present_xtruth'], './images/mnist_x_present_truth.png', nrow=10, padding=1, pad_value=100)
+      save_image(stats[':future_xtruth'], './images/mnist_x_future_truth.png', nrow=10, padding=1, pad_value=100)
+      save_image(stats[':present_xtruth'], './images/mnist_x_present_hat.png', nrow=10, padding=1, pad_value=100)
+      save_image(stats[':future_xhat'], './images/mnist_x_future_hat.png', nrow=10, padding=1, pad_value=100)
+      save_image(stats[':present_xerror'], './images/mnist_x_present_error.png', nrow=10, padding=1, pad_value=100)
+      save_image(stats[':future_xerror'], './images/mnist_x_future_error.png', nrow=10, padding=1, pad_value=100)
+
+      # import pdb; pdb.set_trace()
+
+      # # Save the training sequence as raw images so we can transfer it to Beyond-MSE.
+      # for i in range(x.shape[1]):
+      #   save_image(x[0,i], './images/raw_sequence/seq{}.png'.format(i), padding=0)
+      # for i in range(x_future.shape[1]):
+      #   save_image(x_future[0,i], './images/raw_sequence/seq{}.png'.format(i + x.shape[1]), padding=0)
 
     self.train()
 

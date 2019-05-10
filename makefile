@@ -1,6 +1,26 @@
 IMAGE_TAG := robert:v1
-CONTAINER_NAME := robert-pottorff-reversible-flow-koopman-2
+CONTAINER_NAME := robert-pottorff-reversible-flow-koopman-8
 TF := $(shell tempfile)
+
+# Jared's commands
+ile-golf-swing-train:
+	USE_CUDA_VISIBLE_DEVICES=1 python main.py --epochs=10000 --batch_size=15 --name=golf-swing --model=FramePredictionBase --train_dataset=GolfSwing --train_dataset.root='/mnt/pccfs/backed_up/jaredtn/data/ucf_action_single_clip/Train/' --train_dataset.sequence_length=15 --logger_debug=False --resume='exit' --resume_uid='golf-swing-02-24-051951'
+
+ile-golf-swing-test:
+	USE_CUDA_VISIBLE_DEVICES=1 python main.py --epochs=1 --batch_size=15 --name=golf-swing --model=FramePredictionBase --train_dataset=GolfSwing --train_dataset.root='/mnt/pccfs/backed_up/jaredtn/data/ucf_action_single_clip/Test/' --train_dataset.sequence_length=15 --logger_debug=True --resume='exit' --resume_uid='golf-swing-02-24-051951'
+
+
+ile-bouncing-mnist-train:
+	CUDA_VISIBLE_DEVICES=0 python main.py --epochs=10000 --batch_size=15 --name=512-d10-checkpoint-32 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset=BouncingMNIST --train_dataset.sequence_length=15 --model.flow.permute=ReversePermutation --train_dataset.root='/mnt/pccfs/backed_up/jaredtn/data/bouncing_mnist_size64_seqlen15/Train/' --logger_debug=False --resume='exit' --resume_uid='512-d10-checkpoint-32-02-23-032128'
+
+ile-bouncing-mnist-test:
+	CUDA_VISIBLE_DEVICES=2 python main.py --epochs=1 --batch_size=15 --name=512-d10-checkpoint-32 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset=BouncingMNIST --train_dataset.sequence_length=15 --model.flow.permute=ReversePermutation --train_dataset.root='/mnt/pccfs/backed_up/jaredtn/data/bouncing_mnist_size64_seqlen15/Test_ILE/' --logger_debug=True --resume='exit' --resume_uid='512-d10-checkpoint-32-02-23-032128'
+
+ile-bouncing-mnist-train-1x1conv:
+	CUDA_VISIBLE_DEVICES=3 python main.py --epochs=10000 --batch_size=15 --name=bouncing-mnist-1x1conv --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --model.flow.num_layers_per_block=20 --train_dataset=BouncingMNIST --train_dataset.sequence_length=15 --model.flow.permute=Orthogonal1x1Conv --train_dataset.root='/mnt/pccfs/backed_up/jaredtn/data/bouncing_mnist_size64_seqlen15/Train/' --logger_debug=False
+
+
+
 
 .SILENT: train, tensorboard
 
@@ -16,7 +36,7 @@ train:
 
 profile:
 	kernprof -l -o /dev/null main.py $(args)
-	
+
 docker-build:
 	docker build --no-cache -t ${IMAGE_TAG} -f ./Dockerfile .
 
@@ -31,10 +51,10 @@ experiment:
 	# CUDA_VISIBLE_DEVICES=1 python main.py --epochs=500 --name=256-d20 --model.flow.flow.f.hidden=256 --model.flow.num_layers_per_block=20 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation &
 	# CUDA_VISIBLE_DEVICES=2 python main.py --epochs=500 --name=512-d10-checkpoint --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation &
 	# CUDA_VISIBLE_DEVICES=3 python main.py --epochs=500 --name=256-d20-checkpoint --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=256 --model.flow.num_layers_per_block=20 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation
-	
-	CUDA_VISIBLE_DEVICES=0 python main.py --epochs=5000 --batch_size=15 --name=512-d10-checkpoint --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation &
-	CUDA_VISIBLE_DEVICES=1 python main.py --epochs=5000 --batch_size=15 --name=256-d20-checkpoint --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=256 --model.flow.num_layers_per_block=20 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation &
-	CUDA_VISIBLE_DEVICES=2 python main.py --epochs=5000 --batch_size=15 --name=64-d80-checkpoint --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=64 --model.flow.num_layers_per_block=80 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation &
+
+	CUDA_VISIBLE_DEVICES=0 python main.py --epochs=5000 --batch_size=15 --name=512-d10-checkpoint-32 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --train_dataset.width=32 --model.flow.permute=ReversePermutation &
+	CUDA_VISIBLE_DEVICES=1 python main.py --epochs=5000 --batch_size=15 --name=256-d20-checkpoint-32 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=256 --model.flow.num_layers_per_block=20 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --train_dataset.width=32 --model.flow.permute=ReversePermutation &
+	CUDA_VISIBLE_DEVICES=2 python main.py --epochs=5000 --batch_size=15 --name=64-d80-checkpoint-32 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=64 --model.flow.num_layers_per_block=80 --model.max_hidden_dim=256 --train_dataset.sequence_length=25  --train_dataset.width=32 --model.flow.permute=ReversePermutation &
 	CUDA_VISIBLE_DEVICES=4 python main.py --epochs=5000 --batch_size=15 --name=512-d10-checkpoint-64 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --train_dataset.width=64 --train_dataset.height=64 --model.flow.permute=ReversePermutation &
 	CUDA_VISIBLE_DEVICES=5 python main.py --epochs=5000 --batch_size=15 --name=256-d20-checkpoint-64 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=256 --model.flow.num_layers_per_block=20 --model.max_hidden_dim=256 --train_dataset.width=64 --train_dataset.height=64 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation &
 	CUDA_VISIBLE_DEVICES=6 python main.py --epochs=5000 --batch_size=15 --name=512-d10-checkpoint-64-vel6 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --train_dataset.width=64 --train_dataset.height=64 --train_dataset.velocity=6 --model.flow.permute=ReversePermutation &
@@ -43,7 +63,7 @@ experiment:
 	# CUDA_VISIBLE_DEVICES=4 python main.py --epochs=5000 --name=512-d10-checkpoint-128 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=512 --model.max_hidden_dim=256 --train_dataset.sequence_length=25 --train_dataset.width=128 --train_dataset.height=128 --model.flow.permute=ReversePermutation &
 	# CUDA_VISIBLE_DEVICES=5 python main.py --epochs=5000 --name=256-d20-checkpoint-128 --model.flow.checkpoint_gradients=True --model.flow.flow.f.hidden=256 --model.flow.num_layers_per_block=20 --model.max_hidden_dim=256 --train_dataset.width=128 --train_dataset.height=128 --train_dataset.sequence_length=25 --model.flow.permute=ReversePermutation
 
-	# let's try 
+	# let's try
 		# 128x128 bouncing mnist
 		# strided convolutions in the flow block
 		# deeper layers in the flow block

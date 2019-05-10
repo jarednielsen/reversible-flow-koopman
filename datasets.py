@@ -4,6 +4,7 @@ import torch
 from torchvision import datasets, transforms
 import os
 
+from glob import glob
 import libs.args.args as args
 import sys
 import os
@@ -32,10 +33,181 @@ from moving_symbols import MovingSymbolsEnvironment
 #   	else:
 #   		return super(Dataset, self).__len__()
 
+class GolfSwingClips(torch.utils.data.Dataset):
+    """
+    Returns (N, 3, 32, 32) tensor by default for a single item.
+    Compare to (32, 32, 3 * 11) tensor in AVG dataset.
+    """
+
+    def __init__(self, root="/mnt/pccfs/backed_up/jaredtn/data/ucf_action_combined/.Clips/", sequence_length=10, num_channels=3,
+                transformation=transforms.Compose([
+                  transforms.Resize((32,32)),
+                  transforms.ToTensor(),
+                ]),
+                projection_dimensions=32, use_pca=False, overfit=False, repeats=100, train=False):
+      super().__init__()
+      self.root = root
+      self.n_clips = len(glob(root + '*'))
+
+    def denormalize(self, x):
+      return 255/2 * (x + 1)
+
+    def __getitem__(self, index):
+      path = self.root + str(np.random.choice(self.n_clips)) + '.npz'
+      clip = np.load(path)['arr_0'] # (H, W, 3 * FRAMES) concatenates along the RGB axis. Undo this.
+      h, w, threef = clip.shape
+      f = threef // 3
+      reshaped_clip = np.zeros((f, 3, h, w))
+      for i in range(f):
+        reshaped_clip[i] = clip[:,:,3*i:3*(i+1)].transpose([2, 0, 1])
+      reshaped_clip = torch.Tensor(reshaped_clip)
+
+      reshaped_clip = np.transpose(clip, [2, 0, 1])
+      reshaped_clip = 2 / 255 * reshaped_clip - 1 # normalize
+
+      return reshaped_clip, reshaped_clip[0][0]
+
+    def __len__(self):
+      return self.n_clips
+
+    def __repr__(self):
+      summary =   '                   Name: {}\n'.format(self.__class__.__name__)
+      summary += '                    Size: {}\n'.format(self.__getitem__(0)[0].shape)
+      summary += '               Min Value: {:.2f}\n'.format(self.__getitem__(0)[0].min().item())
+      summary += '               Max Value: {:.2f}\n'.format(self.__getitem__(0)[0].max().item())
+
+      return summary 
+
+class BouncingMNIST(torch.utils.data.Dataset):
+    """
+    Returns (10, 3, 32, 32) tensor by default for a single item.
+    Compare to (32, 32, 3 * 11) tensor in AVG dataset.
+    """
+    def __init__(self, root="/mnt/pccfs/backed_up/jaredtn/data/bouncing_mnist/Test_Single/", sequence_length=15, num_channels=3,
+                projection_dimensions=32, use_pca=False, overfit=False, repeats=100, train=False, height=32, width=32):
+      super().__init__()
+
+      transformation=transforms.Compose([
+        transforms.Resize((height,width)),
+        # transforms.Grayscale(),
+        transforms.ToTensor(),
+      ])
+      
+      # self.repeats = repeats
+      # self.overfit = overfit
+      # if overfit:
+      #   self.size = args.reader().batch_size
+      
+      # Set up image loader
+      self.dataset_folder = datasets.ImageFolder(os.path.join(root), transform = transformation)        
+      self.total_num_frames = len(self.dataset_folder)
+      self.sequence_length = sequence_length
+
+      c, h, w = self.dataset_folder[0][0].size()
+      
+      # Create data, which is a tensor containing each image sequentially. Length is the number of files in the folder
+      # c + (c % 2)
+      self.data = torch.zeros([self.total_num_frames, c, h, w]).float()
+      for i in range(self.total_num_frames):
+          self.data[i] = self.dataset_folder[i][0]
+
+      self.centering_const = self.data.view(self.total_num_frames, -1).mean()
+      self.normalizing_const = (self.data - self.centering_const).abs().mean()
+
+    def normalize(self, x):
+      return (x - self.centering_const) / self.normalizing_const
+
+    def denormalize(self, x):
+      return x * self.normalizing_const + self.centering_const
+
+    def __getitem__(self,index):
+      assert index < self.__len__(), "Index {} is out-of-bounds for dataset with length {}".format(index, self.__len__())
+      # Ensure we start at the beginning of a sequence
+      frames = self.data[index * self.sequence_length : (index + 1) * self.sequence_length]
+      # Add Gaussian noise
+      frames += (torch.rand_like(frames) - .5) * 1 / 255
+      frames = self.normalize(frames)
+
+      if len(frames) == 0:
+        import pdb; pdb.set_trace()
+      return frames, frames[0,0]
+
+    def __len__(self):
+      return self.total_num_frames // self.sequence_length
+
+    def __repr__(self):
+      summary =   '                   Name: {}\n'.format(self.__class__.__name__)
+      summary += '                    Size: {}\n'.format(self.__getitem__(0)[0].shape)
+      summary += '               Min Value: {:.2f}\n'.format(self.__getitem__(0)[0].min().item())
+      summary += '               Max Value: {:.2f}\n'.format(self.__getitem__(0)[0].max().item())
+
+      return summary  
+
+class GolfSwing(torch.utils.data.Dataset):
+    """
+    Returns (10, 3, 32, 32) tensor by default for a single item.
+    Compare to (32, 32, 3 * 11) tensor in AVG dataset.
+    """
+    def __init__(self, root="/mnt/pccfs/backed_up/jaredtn/data/ucf_action_single_clip/Train/", sequence_length=15, num_channels=3,
+                transformation=transforms.Compose([
+                  transforms.Resize((32,32)),
+                  transforms.ToTensor(),
+                ]),
+                projection_dimensions=32, use_pca=False, overfit=False, repeats=100, train=False):
+      super().__init__()
+      
+      self.repeats = repeats
+      self.overfit = overfit
+      if overfit:
+        self.size = args.reader().batch_size
+      
+      # Set up image loader
+      self.dataset_folder = datasets.ImageFolder(os.path.join(root) ,transform = transformation)        
+      self.total_num_frames = len(self.dataset_folder)
+      self.sequence_length = sequence_length
+
+      c, h, w = self.dataset_folder[0][0].size()
+      
+      # Create data, which is a tensor containing each image sequentially. Length is the number of files in the folder
+      # c + (c % 2)
+      self.data = torch.zeros([self.total_num_frames, c, h, w]).float()
+      for i in range(self.total_num_frames):
+          self.data[i] = self.dataset_folder[i][0]
+
+      self.centering_const = 0 #self.data.view(self.total_num_frames, -1).mean()
+      self.normalizing_const = 0.1 #(self.data - self.centering_const).abs().mean()
+
+
+    def denormalize(self, x):
+      return x * self.normalizing_const + self.centering_const
+
+    def __getitem__(self,index):
+      index = index % ((self.total_num_frames - self.sequence_length + 1) if not self.overfit else self.size)
+      raw = self.data[index: index + self.sequence_length]
+      raw += (torch.rand_like(raw) - .5) * 1 / 256. 
+      raw = (raw - self.centering_const) / self.normalizing_const
+
+      return raw, raw[0,0]
+
+    def __len__(self):
+      if self.overfit:
+        # Total number of sequences = Total Frames - Sequence Length + 1
+        return self.size * self.repeats
+
+      return (self.total_num_frames - self.sequence_length + 1) * self.repeats
+
+    def __repr__(self):
+      summary =   '                   Name: {}\n'.format(self.__class__.__name__)
+      summary += '                    Size: {}\n'.format(self.__getitem__(0)[0].shape)
+      summary += '               Min Value: {:.2f}\n'.format(self.__getitem__(0)[0].min().item())
+      summary += '               Max Value: {:.2f}\n'.format(self.__getitem__(0)[0].max().item())
+
+      return summary            
+
 class RotatingCube(torch.utils.data.Dataset):
     def __init__(self, root="/mnt/pccfs/not_backed_up/data/cube_data/spherecube_const_pitch_yaw_16", sequence_length=10, num_channels=3, 
                   transformation=transforms.Compose([transforms.ToTensor()]), 
-                  projection_dimensions=2 * 8 * 8, use_pca=False, overfit=False, repeats=10000, train=False):
+                  projection_dimensions=2 * 8 * 8, use_pca=False, overfit=False, repeats=1, train=False):
       super(RotatingCube, self).__init__()
       
       self.repeats = repeats
@@ -121,7 +293,7 @@ class MovingSymbols(torch.utils.data.Dataset):
       super(MovingSymbols, self).__init__()
 
       self.overfit = overfit
-      self.batch_size = args.reader().batch_size
+      self.batch_size = 16 #args.reader().batch_size
       self.sequence_length = sequence_length
 
       self.params = {
@@ -135,6 +307,7 @@ class MovingSymbols(torch.utils.data.Dataset):
       }
 
       self.size = size if not self.overfit else self.batch_size
+      print("size: {}".format(self.size))
 
       # save_location = os.path.join(root, 'moving_symbols_{}.{}.{}.{}.npy'.format(size, height, width, sequence_length))
       # if os.path.isfile(save_location):

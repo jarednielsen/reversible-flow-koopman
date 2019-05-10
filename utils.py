@@ -3,6 +3,8 @@ from collections import defaultdict, OrderedDict
 import torch
 import numpy as np
 import builtins
+from skimage.measure import compare_ssim, compare_psnr
+
 
 is_profile = 'profile' in builtins.__dict__
 profile = builtins.__dict__.get('profile', lambda x: x)
@@ -16,6 +18,32 @@ profile = builtins.__dict__.get('profile', lambda x: x)
 #             return 
 #         return inner
 #     return wrapper
+
+def rescale(img):
+    return 255 * (img - img.min()) / (img.max() - img.min())
+
+def psnr(img1, img2):
+    img1, img2 = rescale(np.array(img1)), rescale(np.array(img2))
+    mse = np.mean( (img1 - img2) ** 2 )
+    if mse == 0:
+        return 100
+    PIXEL_MAX = 255.0
+    return 10 * np.log10(PIXEL_MAX ** 2 / mse)
+
+def sklearn_psnr(img1, img2):
+    img1, img2 = np.array(img1), np.array(img2)
+    if img1.shape[0] == 3:
+        img1 = np.transpose(img1, [1, 2, 0])
+        img2 = np.transpose(img2, [1, 2, 0])
+    return compare_psnr(img1, img2, data_range=img1.max() - img1.min())
+
+def sklearn_ssim(img1, img2):
+    img1, img2 = np.array(img1), np.array(img2)
+    if img1.shape[0] == 3:
+        img1 = np.transpose(img1, [1, 2, 0])
+        img2 = np.transpose(img2, [1, 2, 0])
+    return compare_ssim(img1, img2, data_range=img1.max() - img1.min(), multichannel=True)
+
 
 def logv(string=""):
     import inspect

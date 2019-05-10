@@ -12,6 +12,9 @@ import libs.colors.colors as colors
 import utils
 import atexit
 
+from torch.utils.data import DataLoader
+
+
 #from apex import amp
 
 args.module('model', [models.FramePredictionBase, models.GlowPrediction])
@@ -23,7 +26,7 @@ args.module('scheduler', schedules)
 
 args.arguments(epochs=100, name='exp', batch_size=100, resume='', resume_uid='', shuffle_training=True,
                validation_frequency=5000, checkpoint_frequency=1000, cuda=True, print_model=False, max_grad=3, 
-               max_grad_norm=20, amp=True, checkpoint=True)
+               max_grad_norm=20, amp=True, checkpoint=True, logger_debug=False)
 
 args.defaults({'optimizer.lr': .0001})
 
@@ -83,8 +86,39 @@ def main():
   if pargs.checkpoint:
     atexit.register(trainer.checkpoint, model, optimizer, tag='exit', log=print)
 
+  if pargs.logger_debug:
+    print("Debugging the logger")
+    dataloader = DataLoader(train_dataset, batch_size=1)
+    step = 0
+
+    for data in dataloader:
+      # batch is (batch, seq_len, 3, 16, 16) for the BouncingMNIST loader
+      x, y = data
+      x = x.cuda()
+      # WARNING: This next line is dependent on sequence length. If we load a model trained on seq_len 25,
+      # then we would instantiate the logger_debug with seq_len 30 (25 for train, and 5 for test).
+      # The training algorithm does not use anything for test.
+      seq_len_present = 10
+      seq_len_future = 5
+      x_train, x_test = x[:,:seq_len_present], x[:,seq_len_present:] # preserve batch dimension, split frames dimension
+      loss_value, out = model(step, x_train, y)
+      stats = model_obj.logger(step, (x_train, x_test), out, force_log=True)
+
+      import pdb; pdb.set_trace()
+
+    return
+
+  print("started main, {} epochs".format(pargs.epochs))
+
   for (epoch, batch, step, bar), data in trainer(train_dataset, epochs=pargs.epochs, 
     progress='Training', shuffle=pargs.shuffle_training, batch_size=pargs.batch_size):
+    x, y = data
+    x = x.cuda()
+
+    seq_len_present = 10
+    seq_len_future = 5
+    x_train, x_test = x[:,:seq_len_present], x[:,seq_len_present:] # preserve batch dimension, split frames dimension
+    data = (x_train, x_test)
 
     trainer.state_dict['step'] = step + 1 # resume starting on the next step
 
@@ -99,7 +133,9 @@ def main():
     loss_value.backward()
     torch.cuda.synchronize()
 
-    trainer.log(step, loss=loss_value, m=model_obj.logger(step, data, out))
+    print("Running an epoch")
+
+    trainer.log(step, loss=loss_value, m=model_obj.logger(step, data, out, force_log=True))
     
     #with amp_handle.scale_loss(loss_value, optimizer) as scaled_loss:
     #  scaled_loss.backward()
